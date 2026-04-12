@@ -34,6 +34,7 @@ class Settings:
     target_crf: int
     target_preset: str
     output_suffix: str
+    replace_original_after_success: bool
     delete_original_after_success: bool
     skip_if_output_exists: bool
     cache_file: Path
@@ -87,6 +88,7 @@ def load_settings(config_path: Path) -> Settings:
         target_crf=int(getattr(config, "TARGET_CRF", 20)),
         target_preset=str(getattr(config, "TARGET_PRESET", "medium")),
         output_suffix=str(getattr(config, "OUTPUT_SUFFIX", "_dolby_free")),
+        replace_original_after_success=bool(getattr(config, "REPLACE_ORIGINAL_AFTER_SUCCESS", False)),
         delete_original_after_success=bool(getattr(config, "DELETE_ORIGINAL_AFTER_SUCCESS", False)),
         skip_if_output_exists=bool(getattr(config, "SKIP_IF_OUTPUT_EXISTS", True)),
         cache_file=resolved_cache_file,
@@ -106,7 +108,15 @@ def validate_settings(settings: Settings) -> None:
         raise RuntimeError("TARGET_EXTENSION must start with a dot, for example '.mkv'")
     if any(not ext.startswith(".") for ext in settings.media_extensions):
         raise RuntimeError("Every MEDIA_EXTENSIONS entry must start with a dot.")
-    if not settings.output_suffix and settings.target_extension in settings.media_extensions:
+    if settings.replace_original_after_success and settings.delete_original_after_success:
+        raise RuntimeError(
+            "REPLACE_ORIGINAL_AFTER_SUCCESS and DELETE_ORIGINAL_AFTER_SUCCESS cannot both be enabled."
+        )
+    if (
+        not settings.replace_original_after_success
+        and not settings.output_suffix
+        and settings.target_extension in settings.media_extensions
+    ):
         raise RuntimeError(
             "OUTPUT_SUFFIX cannot be empty when TARGET_EXTENSION can match the source file extension."
         )
@@ -126,6 +136,7 @@ def build_config_hash(settings: Settings) -> str:
         "target_crf": settings.target_crf,
         "target_preset": settings.target_preset,
         "output_suffix": settings.output_suffix,
+        "replace_original_after_success": settings.replace_original_after_success,
         "delete_original_after_success": settings.delete_original_after_success,
         "skip_if_output_exists": settings.skip_if_output_exists,
     }
@@ -239,6 +250,8 @@ def analyze_probe(probe: ProbeSummary, settings: Settings) -> dict[str, Any]:
 
 
 def build_output_path(source: Path, settings: Settings) -> Path:
+    if settings.replace_original_after_success:
+        return source.with_suffix(settings.target_extension)
     return source.with_name(f"{source.stem}{settings.output_suffix}{settings.target_extension}")
 
 
@@ -299,15 +312,21 @@ def ensure_target_parent(target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
 
 
-def convert_file(source: Path, output_path: Path, analysis: dict[str, Any], settings: Settings, dry_run: bool) -> str:
+def convert_file(
+    source: Path,
+    output_path: Path,
+    analysis: dict[str, Any],
+    settings: Settings,
+    dry_run: bool,
+) -> tuple[str, bool]:
     ensure_target_parent(output_path)
-    if settings.skip_if_output_exists and output_path.exists():
-        return "output_exists"
+    if settings.skip_if_output_exists and output_path.exists() and output_path != source:
+        return "output_exists", False
 
     if dry_run:
         command = build_ffmpeg_command(source, output_path, analysis, settings)
         print(f"[dry-run] {' '.join(command)}")
-        return "dry_run"
+        return "dry_run", False
 
     with tempfile.NamedTemporaryFile(
         prefix=f"{output_path.stem}.",
@@ -323,10 +342,18 @@ def convert_file(source: Path, output_path: Path, analysis: dict[str, Any], sett
         temp_path.unlink(missing_ok=True)
         raise RuntimeError(f"ffmpeg failed for {source}")
 
+    if output_path.exists() and output_path != source:
+        output_path.unlink()
+
     temp_path.replace(output_path)
-    if settings.delete_original_after_success:
+    source_removed = False
+    if settings.replace_original_after_success and output_path != source:
         source.unlink()
-    return "converted"
+        source_removed = True
+    elif settings.delete_original_after_success:
+        source.unlink()
+        source_removed = True
+    return "converted", source_removed
 
 
 def cache_entry_for(path: Path, signature: dict[str, int], probe: ProbeSummary, analysis: dict[str, Any], output_path: Path, status: str) -> dict[str, Any]:
@@ -351,6 +378,19 @@ def probe_from_cache(entry: dict[str, Any]) -> ProbeSummary:
 
 def signatures_match(left: dict[str, Any], right: dict[str, int]) -> bool:
     return left.get("mtime_ns") == right["mtime_ns"] and left.get("size") == right["size"]
+
+
+def build_final_cache_entry(path: Path, settings: Settings, status: str) -> dict[str, Any]:
+    probe = run_ffprobe(path)
+    analysis = analyze_probe(probe, settings)
+    return cache_entry_for(
+        path=path,
+        signature=file_signature(path),
+        probe=probe,
+        analysis=analysis,
+        output_path=path,
+        status=status,
+    )
 
 
 def process_files(settings: Settings, dry_run: bool, force_rescan: bool) -> int:
@@ -402,30 +442,47 @@ def process_files(settings: Settings, dry_run: bool, force_rescan: bool) -> int:
                 stats["probed"] += 1
 
             output_path = build_output_path(path, settings)
-            if output_path == path:
+            if output_path == path and not settings.replace_original_after_success:
                 raise RuntimeError("Output path resolves to the same file as the source.")
 
             if analysis["needs_conversion"]:
-                status = convert_file(path, output_path, analysis, settings, dry_run)
+                status, source_removed = convert_file(path, output_path, analysis, settings, dry_run)
                 if status == "converted":
                     stats["converted"] += 1
                 elif status == "output_exists":
                     stats["skipped_output_exists"] += 1
             else:
                 status = "clean"
+                source_removed = False
                 stats["skipped_clean"] += 1
 
-            entries[path_key] = cache_entry_for(path, signature, probe, analysis, output_path, status)
+            if status == "converted" and not dry_run and output_path.exists():
+                if output_path == path:
+                    entries[path_key] = build_final_cache_entry(output_path, settings, status)
+                elif settings.replace_original_after_success and source_removed:
+                    entries.pop(path_key, None)
+                    output_key = str(output_path.resolve())
+                    entries[output_key] = build_final_cache_entry(output_path, settings, status)
+                    seen_paths.add(output_key)
+                else:
+                    entries[path_key] = cache_entry_for(path, signature, probe, analysis, output_path, status)
+            elif source_removed:
+                entries.pop(path_key, None)
+            else:
+                entries[path_key] = cache_entry_for(path, signature, probe, analysis, output_path, status)
 
-            reason_bits = []
-            if analysis["bad_audio"]:
-                reason_bits.append(f"audio={','.join(analysis['bad_audio'])}")
-            if analysis["bad_video"]:
-                reason_bits.append(f"video={','.join(analysis['bad_video'])}")
-            if analysis["bad_containers"]:
-                reason_bits.append(f"container={','.join(analysis['bad_containers'])}")
-            reason = "; ".join(reason_bits) if reason_bits else "already compatible"
-            print(f"[{status}] {path} -> {output_path} ({reason})")
+            save_cache(settings.cache_file, cache)
+
+            if not use_cache or status in {"converted", "dry_run"}:
+                reason_bits = []
+                if analysis["bad_audio"]:
+                    reason_bits.append(f"audio={','.join(analysis['bad_audio'])}")
+                if analysis["bad_video"]:
+                    reason_bits.append(f"video={','.join(analysis['bad_video'])}")
+                if analysis["bad_containers"]:
+                    reason_bits.append(f"container={','.join(analysis['bad_containers'])}")
+                reason = "; ".join(reason_bits) if reason_bits else "already compatible"
+                print(f"[{status}] {path} -> {output_path} ({reason})")
         except Exception as exc:
             stats["errors"] += 1
             print(f"[error] {path}: {exc}", file=sys.stderr)
@@ -434,6 +491,7 @@ def process_files(settings: Settings, dry_run: bool, force_rescan: bool) -> int:
                 "status": "error",
                 "error": str(exc),
             }
+            save_cache(settings.cache_file, cache)
 
     stale_paths = [path for path in entries if path not in seen_paths]
     for path in stale_paths:

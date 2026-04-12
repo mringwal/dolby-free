@@ -44,6 +44,7 @@ TARGET_PRESET = "medium"
 
 # Output naming and file handling.
 OUTPUT_SUFFIX = "_dolby_free"
+REPLACE_ORIGINAL_AFTER_SUCCESS = False
 DELETE_ORIGINAL_AFTER_SUCCESS = False
 SKIP_IF_OUTPUT_EXISTS = True
 
