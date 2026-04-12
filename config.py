@@ -20,6 +20,11 @@ MEDIA_EXTENSIONS = {
     ".wmv",
 }
 
+# Directory names that should stop traversal entirely.
+TRAVERSAL_STOP_COMPONENTS = {
+    "==WATCHED==",
+}
+
 # ffprobe codec/container names that should trigger a conversion.
 FORMATS_TO_AVOID = {
     "audio_codecs": {

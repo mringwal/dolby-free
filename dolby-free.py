@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ DEFAULT_CONFIG_PATH = SCRIPT_DIR / "config.py"
 class Settings:
     media_folders: list[Path]
     media_extensions: set[str]
+    traversal_stop_components: set[str]
     audio_codecs_to_avoid: set[str]
     video_codecs_to_avoid: set[str]
     container_formats_to_avoid: set[str]
@@ -77,6 +79,7 @@ def load_settings(config_path: Path) -> Settings:
     return Settings(
         media_folders=[Path(path).expanduser() for path in getattr(config, "MEDIA_FOLDERS", [])],
         media_extensions={str(ext).lower() for ext in getattr(config, "MEDIA_EXTENSIONS", set())},
+        traversal_stop_components={str(part).strip() for part in getattr(config, "TRAVERSAL_STOP_COMPONENTS", set()) if str(part).strip()},
         audio_codecs_to_avoid=normalize_set(avoid.get("audio_codecs")),
         video_codecs_to_avoid=normalize_set(avoid.get("video_codecs")),
         container_formats_to_avoid=normalize_set(avoid.get("container_formats")),
@@ -125,6 +128,7 @@ def validate_settings(settings: Settings) -> None:
 def build_config_hash(settings: Settings) -> str:
     payload = {
         "media_extensions": sorted(settings.media_extensions),
+        "traversal_stop_components": sorted(settings.traversal_stop_components),
         "audio_codecs_to_avoid": sorted(settings.audio_codecs_to_avoid),
         "video_codecs_to_avoid": sorted(settings.video_codecs_to_avoid),
         "container_formats_to_avoid": sorted(settings.container_formats_to_avoid),
@@ -181,14 +185,29 @@ def iter_media_files(settings: Settings) -> list[Path]:
         if not folder.is_dir():
             print(f"[warn] Not a directory: {folder}", file=sys.stderr)
             continue
-        for path in folder.rglob("*"):
-            if not path.is_file():
+
+        for root, dirnames, filenames in os.walk(folder, topdown=True):
+            root_path = Path(root)
+            if settings.traversal_stop_components and any(
+                part in settings.traversal_stop_components for part in root_path.parts
+            ):
+                dirnames[:] = []
                 continue
-            if path.suffix.lower() not in settings.media_extensions:
-                continue
-            if settings.output_suffix and path.stem.endswith(settings.output_suffix):
-                continue
-            files.append(path)
+
+            if settings.traversal_stop_components:
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if dirname not in settings.traversal_stop_components
+                ]
+
+            for filename in filenames:
+                path = root_path / filename
+                if path.suffix.lower() not in settings.media_extensions:
+                    continue
+                if settings.output_suffix and path.stem.endswith(settings.output_suffix):
+                    continue
+                files.append(path)
     return sorted(files)
 
 

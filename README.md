@@ -5,6 +5,7 @@
 ## How it works
 
 - Folders come from `config.py`.
+- Directory names in `TRAVERSAL_STOP_COMPONENTS` are not descended into, so files under folders like `==WATCHED==` are ignored completely.
 - The script stores scan results in `.dolby-free-cache.json` and flushes progress after each processed file, so interrupted runs can resume without losing earlier work.
 - If an avoid-listed audio codec is found, audio is transcoded to AAC.
 - If an avoid-listed video codec is found, video is transcoded to H.264.
@@ -17,6 +18,7 @@
 Edit [config.py](/Users/mringwal/Projects/dolby-free/config.py) and set:
 
 - `MEDIA_FOLDERS` to the directories you want scanned.
+- `TRAVERSAL_STOP_COMPONENTS` to the directory names that should stop recursive traversal.
 - `FORMATS_TO_AVOID["audio_codecs"]`, `["video_codecs"]`, and `["container_formats"]` to the ffprobe names you want to reject.
 - Output settings if you want something other than H.264/AAC in MKV.
 - `REPLACE_ORIGINAL_AFTER_SUCCESS = True` if you want the converted file to become the main copy once conversion succeeds.
