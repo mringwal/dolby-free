@@ -25,6 +25,8 @@ class Settings:
     media_folders: list[Path]
     media_extensions: set[str]
     traversal_stop_components: set[str]
+    disable_surround_sound: bool
+    target_audio_channels: int
     audio_codecs_to_avoid: set[str]
     video_codecs_to_avoid: set[str]
     container_formats_to_avoid: set[str]
@@ -48,6 +50,7 @@ class ProbeSummary:
     format_names: set[str]
     video_codecs: list[str]
     audio_codecs: list[str]
+    audio_channels: list[int]
     subtitle_codecs: list[str]
 
 
@@ -80,6 +83,8 @@ def load_settings(config_path: Path) -> Settings:
         media_folders=[Path(path).expanduser() for path in getattr(config, "MEDIA_FOLDERS", [])],
         media_extensions={str(ext).lower() for ext in getattr(config, "MEDIA_EXTENSIONS", set())},
         traversal_stop_components={str(part).strip() for part in getattr(config, "TRAVERSAL_STOP_COMPONENTS", set()) if str(part).strip()},
+        disable_surround_sound=bool(getattr(config, "DISABLE_SURROUND_SOUND", False)),
+        target_audio_channels=int(getattr(config, "TARGET_AUDIO_CHANNELS", 2)),
         audio_codecs_to_avoid=normalize_set(avoid.get("audio_codecs")),
         video_codecs_to_avoid=normalize_set(avoid.get("video_codecs")),
         container_formats_to_avoid=normalize_set(avoid.get("container_formats")),
@@ -123,12 +128,16 @@ def validate_settings(settings: Settings) -> None:
         raise RuntimeError(
             "OUTPUT_SUFFIX cannot be empty when TARGET_EXTENSION can match the source file extension."
         )
+    if settings.target_audio_channels < 1:
+        raise RuntimeError("TARGET_AUDIO_CHANNELS must be at least 1.")
 
 
 def build_config_hash(settings: Settings) -> str:
     payload = {
         "media_extensions": sorted(settings.media_extensions),
         "traversal_stop_components": sorted(settings.traversal_stop_components),
+        "disable_surround_sound": settings.disable_surround_sound,
+        "target_audio_channels": settings.target_audio_channels,
         "audio_codecs_to_avoid": sorted(settings.audio_codecs_to_avoid),
         "video_codecs_to_avoid": sorted(settings.video_codecs_to_avoid),
         "container_formats_to_avoid": sorted(settings.container_formats_to_avoid),
@@ -229,6 +238,7 @@ def run_ffprobe(path: Path) -> ProbeSummary:
     format_names = normalize_set((data.get("format") or {}).get("format_name", "").split(","))
     video_codecs: list[str] = []
     audio_codecs: list[str] = []
+    audio_channels: list[int] = []
     subtitle_codecs: list[str] = []
     for stream in data.get("streams", []):
         codec_name = str(stream.get("codec_name", "")).strip().lower()
@@ -237,12 +247,17 @@ def run_ffprobe(path: Path) -> ProbeSummary:
             video_codecs.append(codec_name)
         elif codec_type == "audio" and codec_name:
             audio_codecs.append(codec_name)
+            try:
+                audio_channels.append(int(stream.get("channels", 0) or 0))
+            except (TypeError, ValueError):
+                audio_channels.append(0)
         elif codec_type == "subtitle" and codec_name:
             subtitle_codecs.append(codec_name)
     return ProbeSummary(
         format_names=format_names,
         video_codecs=video_codecs,
         audio_codecs=audio_codecs,
+        audio_channels=audio_channels,
         subtitle_codecs=subtitle_codecs,
     )
 
@@ -252,6 +267,7 @@ def summarize_probe(probe: ProbeSummary) -> dict[str, list[str]]:
         "format_names": sorted(probe.format_names),
         "video_codecs": probe.video_codecs,
         "audio_codecs": probe.audio_codecs,
+        "audio_channels": [str(channels) for channels in probe.audio_channels],
         "subtitle_codecs": probe.subtitle_codecs,
     }
 
@@ -260,11 +276,19 @@ def analyze_probe(probe: ProbeSummary, settings: Settings) -> dict[str, Any]:
     bad_audio = sorted(set(probe.audio_codecs) & settings.audio_codecs_to_avoid)
     bad_video = sorted(set(probe.video_codecs) & settings.video_codecs_to_avoid)
     bad_containers = sorted(probe.format_names & settings.container_formats_to_avoid)
+    bad_audio_channels = sorted(
+        {
+            channels
+            for channels in probe.audio_channels
+            if settings.disable_surround_sound and channels > settings.target_audio_channels
+        }
+    )
     return {
         "bad_audio": bad_audio,
+        "bad_audio_channels": bad_audio_channels,
         "bad_video": bad_video,
         "bad_containers": bad_containers,
-        "needs_conversion": bool(bad_audio or bad_video or bad_containers),
+        "needs_conversion": bool(bad_audio or bad_audio_channels or bad_video or bad_containers),
     }
 
 
@@ -276,7 +300,7 @@ def build_output_path(source: Path, settings: Settings) -> Path:
 
 def build_ffmpeg_command(source: Path, target: Path, analysis: dict[str, Any], settings: Settings) -> list[str]:
     video_mode = "transcode" if analysis["bad_video"] else "copy"
-    audio_mode = "transcode" if analysis["bad_audio"] else "copy"
+    audio_mode = "transcode" if analysis["bad_audio"] or analysis["bad_audio_channels"] else "copy"
 
     command = [
         "ffmpeg",
@@ -315,6 +339,8 @@ def build_ffmpeg_command(source: Path, target: Path, analysis: dict[str, Any], s
                 settings.target_audio_bitrate,
             ]
         )
+        if analysis["bad_audio_channels"]:
+            command.extend(["-ac:a", str(settings.target_audio_channels)])
     else:
         command.extend(["-c:a", "copy"])
 
@@ -361,9 +387,11 @@ def convert_file(
         temp_path.unlink(missing_ok=True)
         raise RuntimeError(f"ffmpeg failed for {source}")
 
+    # delete output file if it already exists
     if output_path.exists() and output_path != source:
         output_path.unlink()
 
+    # rename temp file as output
     temp_path.replace(output_path)
     source_removed = False
     if settings.replace_original_after_success and output_path != source:
@@ -391,6 +419,7 @@ def probe_from_cache(entry: dict[str, Any]) -> ProbeSummary:
         format_names=set(probe.get("format_names", [])),
         video_codecs=list(probe.get("video_codecs", [])),
         audio_codecs=list(probe.get("audio_codecs", [])),
+        audio_channels=[int(channels) for channels in probe.get("audio_channels", [])],
         subtitle_codecs=list(probe.get("subtitle_codecs", [])),
     )
 
@@ -496,6 +525,11 @@ def process_files(settings: Settings, dry_run: bool, force_rescan: bool) -> int:
                 reason_bits = []
                 if analysis["bad_audio"]:
                     reason_bits.append(f"audio={','.join(analysis['bad_audio'])}")
+                if analysis["bad_audio_channels"]:
+                    reason_bits.append(
+                        "channels="
+                        + ",".join(str(channels) for channels in analysis["bad_audio_channels"])
+                    )
                 if analysis["bad_video"]:
                     reason_bits.append(f"video={','.join(analysis['bad_video'])}")
                 if analysis["bad_containers"]:

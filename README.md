@@ -8,6 +8,7 @@
 - Directory names in `TRAVERSAL_STOP_COMPONENTS` are not descended into, so files under folders like `==WATCHED==` are ignored completely.
 - The script stores scan results in `.dolby-free-cache.json` and flushes progress after each processed file, so interrupted runs can resume without losing earlier work.
 - If an avoid-listed audio codec is found, audio is transcoded to AAC.
+- If `DISABLE_SURROUND_SOUND` is enabled, audio streams with more than `TARGET_AUDIO_CHANNELS` are downmixed during conversion.
 - If an avoid-listed video codec is found, video is transcoded to H.264.
 - If only the container is avoid-listed, the file is remuxed into the target container without re-encoding audio/video.
 - Converted files are written next to the source file with the suffix from `OUTPUT_SUFFIX` by default.
@@ -21,6 +22,7 @@ Edit [config.py](/Users/mringwal/Projects/dolby-free/config.py) and set:
 - `TRAVERSAL_STOP_COMPONENTS` to the directory names that should stop recursive traversal.
 - `FORMATS_TO_AVOID["audio_codecs"]`, `["video_codecs"]`, and `["container_formats"]` to the ffprobe names you want to reject.
 - Output settings if you want something other than H.264/AAC in MKV.
+- `DISABLE_SURROUND_SOUND = True` if you want files with surround audio to be downmixed to `TARGET_AUDIO_CHANNELS`.
 - `REPLACE_ORIGINAL_AFTER_SUCCESS = True` if you want the converted file to become the main copy once conversion succeeds.
 - `DELETE_ORIGINAL_AFTER_SUCCESS = True` only if you want to keep the suffixed output file and remove the source file.
 

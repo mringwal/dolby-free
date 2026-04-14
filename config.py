@@ -44,8 +44,12 @@ TARGET_VIDEO_CODEC = "libx264"
 TARGET_AUDIO_CODEC = "aac"
 TARGET_SUBTITLE_CODEC = "copy"
 TARGET_AUDIO_BITRATE = "192k"
+TARGET_AUDIO_CHANNELS = 2
 TARGET_CRF = 20
 TARGET_PRESET = "medium"
+
+# When enabled, audio streams with more than TARGET_AUDIO_CHANNELS are downmixed.
+DISABLE_SURROUND_SOUND = False
 
 # Output naming and file handling.
 OUTPUT_SUFFIX = "_dolby_free"
